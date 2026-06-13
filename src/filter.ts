@@ -1,5 +1,5 @@
 // RegEx patterns for negative filtering (case-insensitive)
-const POLITICAL_PATTERN = new RegExp(
+export const POLITICAL_PATTERN = new RegExp(
   '\\b(' +
     [
       // Figures & Parties
@@ -23,7 +23,7 @@ const POLITICAL_PATTERN = new RegExp(
   'i'
 );
 
-const TECH_PROGRAMMING_PATTERN = new RegExp(
+export const TECH_PROGRAMMING_PATTERN = new RegExp(
   '\\b(' +
     [
       // Coding / Engineering terms
@@ -47,7 +47,7 @@ const TECH_PROGRAMMING_PATTERN = new RegExp(
   'i'
 );
 
-const PROMO_MARKETING_PATTERN = new RegExp(
+export const PROMO_MARKETING_PATTERN = new RegExp(
   '\\b(' +
     [
       // Marketing & Ads
@@ -69,7 +69,17 @@ const PROMO_MARKETING_PATTERN = new RegExp(
 );
 
 // We want to filter out posts containing links
-const LINK_PATTERN = /https?:\/\/[^\s]+/i;
+export const LINK_PATTERN = /https?:\/\/[^\s]+/i;
+
+export function isTextClean(text: string): boolean {
+  if (!text) return true;
+  return (
+    !POLITICAL_PATTERN.test(text) &&
+    !TECH_PROGRAMMING_PATTERN.test(text) &&
+    !PROMO_MARKETING_PATTERN.test(text) &&
+    !LINK_PATTERN.test(text)
+  );
+}
 
 export function shouldIncludePost(post: any): { shouldInclude: boolean; isReply: boolean } {
   const isReply = !!post.reply;

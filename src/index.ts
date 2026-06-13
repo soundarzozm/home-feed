@@ -11,9 +11,10 @@ import {
   pruneOldPosts,
   saveFollows,
   loadAllFollowedDids,
-  getCachedFollowedDids
+  getCachedFollowedDids,
+  getPostTextLocal
 } from './db.js';
-import { shouldIncludePost } from './filter.js';
+import { shouldIncludePost, isTextClean } from './filter.js';
 
 dotenv.config();
 
@@ -222,8 +223,31 @@ const jetstream = new Jetstream({
   endpoint: 'wss://jetstream1.us-east.bsky.network/subscribe'
 });
 
+// Helper to retrieve the text of a quoted post
+async function getPostText(uri: string): Promise<string | null> {
+  // 1. Try local DB first
+  const localText = getPostTextLocal(uri);
+  if (localText !== null) {
+    return localText;
+  }
+
+  // 2. Try fetching from Bluesky API if logged in
+  if (isAgentLoggedIn) {
+    try {
+      const response = await agent.app.bsky.feed.getPosts({ uris: [uri] });
+      const post = response.data.posts[0];
+      if (post && post.record) {
+        return (post.record as any).text || '';
+      }
+    } catch {
+      // Quietly ignore network failures for single lookups
+    }
+  }
+  return null;
+}
+
 // Handle Posts (Queue them instead of direct writing - Proposal 3)
-jetstream.onCreate('app.bsky.feed.post', (event) => {
+jetstream.onCreate('app.bsky.feed.post', async (event) => {
   const post = event.commit.record;
   const author = event.did;
   const uri = `at://${author}/${event.commit.collection}/${event.commit.rkey}`;
@@ -231,9 +255,27 @@ jetstream.onCreate('app.bsky.feed.post', (event) => {
 
   try {
     const { shouldInclude, isReply } = shouldIncludePost(post);
-    if (shouldInclude) {
-      queuePost(uri, cid, author, post.text || '', isReply);
+    if (!shouldInclude) return;
+
+    // Quote post verification: Check if this is a quote post and verify the parent post
+    let quotedUri: string | undefined;
+    if (post.embed) {
+      if (post.embed.$type === 'app.bsky.embed.record') {
+        quotedUri = post.embed.record?.uri;
+      } else if (post.embed.$type === 'app.bsky.embed.recordWithMedia') {
+        quotedUri = post.embed.record?.record?.uri;
+      }
     }
+
+    if (quotedUri && quotedUri.includes('app.bsky.feed.post')) {
+      const quotedText = await getPostText(quotedUri);
+      // If we got the text and it contains negative terms, discard this quote post
+      if (quotedText !== null && !isTextClean(quotedText)) {
+        return;
+      }
+    }
+
+    queuePost(uri, cid, author, post.text || '', isReply);
   } catch (err) {
     console.error('[Jetstream] Error processing post:', err);
   }

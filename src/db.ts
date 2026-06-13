@@ -352,3 +352,12 @@ export function pruneOldPosts(maxAgeHours: number = 48) {
 
   console.log(`[DB] Pruned ${postsRes.changes} posts and ${likesRes.changes} likes older than ${maxAgeHours} hours.`);
 }
+
+export function getPostTextLocal(uri: string): string | null {
+  try {
+    const row = db.prepare('SELECT text FROM posts WHERE uri = ?').get(uri) as { text: string } | undefined;
+    return row ? row.text : null;
+  } catch {
+    return null;
+  }
+}
