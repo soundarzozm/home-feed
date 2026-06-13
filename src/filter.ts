@@ -5,15 +5,19 @@ const POLITICAL_PATTERN = new RegExp(
       // Figures & Parties
       'trump', 'biden', 'harris', 'kamala', 'walz', 'vance', 'obama', 'clinton', 'putin', 'zelensky', 'netanyahu',
       'democrat', 'democrats', 'democratic', 'republican', 'republicans', 'gop', 'maga', 'tory', 'tories', 'labour',
+      'desantis', 'haley', 'ramaswamy', 'kennedy jr', 'rfk',
       // Political Systems & Concepts
       'politics', 'political', 'geopolitics', 'policy', 'government', 'senate', 'congress', 'parliament',
       'election', 'elections', 'vote', 'voting', 'ballot', 'poll', 'polls', 'presidency', 'president', 'governor', 'mayor', 'senator',
-      'activism', 'activist', 'protest', 'protester', 'protesters', 'rally', 'campaigning', 'lobbyist',
+      'activism', 'activist', 'protest', 'protester', 'protesters', 'rally', 'campaigning', 'lobbyist', 'lobbying',
       'capitalism', 'socialism', 'communism', 'fascism', 'fascist', 'liberal', 'conservative', 'leftist', 'rightwing', 'leftwing',
+      'bipartisan', 'partisan', 'gerrymandering', 'filibuster', 'impeachment', 'legislation', 'executive order',
       // Conflict & Geopolitics
       'gaza', 'israel', 'palestine', 'hamas', 'zionist', 'zionism', 'ukraine', 'russia', 'taiwan', 'nato', 'war', 'genocide',
-      // Social/Political Debates
-      'immigration', 'border patrol', 'abortion', 'prolife', 'prochoice', 'supreme court', 'scotus'
+      'ceasefire', 'military strike', 'air strike', 'pentagon', 'kremlin', 'un security council',
+      // Social/Political Debates & Culture War
+      'immigration', 'border patrol', 'deportation', 'abortion', 'prolife', 'prochoice', 'supreme court', 'scotus',
+      'woke', 'antiwoke', 'culture war', 'propaganda', 'censorship', 'free speech', 'misinformation', 'disinformation'
     ].join('|') +
   ')\\b',
   'i'
@@ -28,10 +32,16 @@ const TECH_PROGRAMMING_PATTERN = new RegExp(
       'compiler', 'refactoring', 'refactor', 'debugging', 'debug', 'codebase', 'codebases', 'git', 'github', 'gitlab',
       'repo', 'repository', 'pull request', 'merge conflict', 'docker', 'kubernetes', 'aws', 'serverless', 'cloudflare',
       'database', 'postgres', 'postgresql', 'sqlite', 'mongodb', 'redis', 'npm', 'pnpm', 'yarn', 'package.json',
+      'linux', 'bash', 'powershell', 'regex', 'sql', 'nosql', 'dns', 'ip address', 'http header', 'nginx', 'ci/cd',
       // AI / LLMs (Often tech slop)
       'ai', 'llm', 'llms', 'chatgpt', 'openai', 'claude', 'gemini', 'copilot', 'midjourney', 'generative ai',
+      'artificial intelligence', 'machine learning', 'deep learning', 'neural network', 'stable diffusion',
       // Protocol terms
-      'atproto', 'lexicon', 'lexicons', 'pds', 'feedgen', 'feed generator', 'did:web', 'did:plc'
+      'atproto', 'lexicon', 'lexicons', 'pds', 'feedgen', 'feed generator', 'did:web', 'did:plc',
+      // Startups & SaaS
+      'startup', 'startups', 'founder', 'founders', 'cofounder', 'saas', 'micro-saas', 'indie hacker', 'indiehackers',
+      'solopreneur', 'bootstrap', 'bootstrapped', 'venture capital', 'vc funding', 'seed round', 'pitch deck',
+      'angel investor', 'valuation'
     ].join('|') +
   ')\\b',
   'i'
@@ -40,12 +50,19 @@ const TECH_PROGRAMMING_PATTERN = new RegExp(
 const PROMO_MARKETING_PATTERN = new RegExp(
   '\\b(' +
     [
+      // Marketing & Ads
       'discount', 'coupon', 'promo', 'promotion', 'buy now', 'shop', 'sale', 'sales', 'limited time',
       'check out my', 'my store', 'subscribers', 'subscribe', 'newsletter', 'substack', 'patreon', 'onlyfans',
       'kickstarter', 'gumroad', 'ko-fi', 'merch', 'hiring', 'job opening', 'freelancer', 'freelance',
       'marketing', 'seo', 'audience', 'follower', 'followers', 'monetize', 'affiliate', 'referral',
+      'passive income', 'make money', 'earn money', 'use code', 'link in bio', 'link below', 'read more',
+      'blog post', 'youtube channel', 'twitch stream', 'going live', 'stream starting', 'giveaway', 'giveaways',
+      'contest', 'win a', 'sweepstakes', 'rt to win', 'repost to win', 'like and share', 'tag a friend',
+      'drop a comment', 'comment below',
+      // Finance, Web3 & Crypto
       'crypto', 'bitcoin', 'ethereum', 'solana', 'nft', 'nfts', 'web3', 'airdrop', 'token', 'invest', 'investing',
-      'passive income', 'make money', 'earn money', 'use code'
+      'stocks', 'stock market', 'nasdaq', 'nyse', 'wall street', 'portfolio', 'etf', 'etfs', 'dividends',
+      'defi', 'yield farming', 'staking', 'memecoin', 'memecoins', 'dogecoin'
     ].join('|') +
   ')\\b',
   'i'
