@@ -38,7 +38,7 @@ async function run() {
   });
 
   console.log('Successfully published feed!');
-  console.log(`Record URI: ${response.uri}`);
+  console.log(`Record URI: ${response.data.uri}`);
   console.log(`Feed URL: https://bsky.app/profile/${handle}/feed/${feedRecordKey}`);
 }
 

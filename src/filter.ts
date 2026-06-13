@@ -54,27 +54,23 @@ const PROMO_MARKETING_PATTERN = new RegExp(
 // We want to filter out posts containing links
 const LINK_PATTERN = /https?:\/\/[^\s]+/i;
 
-export function shouldIncludePost(post: any): boolean {
-  // 1. Exclude replies - we only want original thoughts & standalone memes
-  if (post.reply) {
-    return false;
-  }
-
+export function shouldIncludePost(post: any): { shouldInclude: boolean; isReply: boolean } {
+  const isReply = !!post.reply;
   const text = post.text || '';
 
-  // 2. Filter out empty or very short posts (unless there's an image/media)
+  // 1. Filter out empty or very short posts (unless there's an image/media)
   const hasImages = !!(post.embed && (
     post.embed.$type === 'app.bsky.embed.images' ||
     post.embed.$type === 'app.bsky.embed.recordWithMedia'
   ));
   
   if (text.trim().length < 8 && !hasImages) {
-    return false;
+    return { shouldInclude: false, isReply };
   }
 
-  // 3. Filter out posts containing links (very common in promo/news/tech content)
+  // 2. Filter out posts containing links (very common in promo/news/tech content)
   if (LINK_PATTERN.test(text)) {
-    return false;
+    return { shouldInclude: false, isReply };
   }
 
   // Check facets for links as well
@@ -83,43 +79,40 @@ export function shouldIncludePost(post: any): boolean {
       if (facet.features) {
         for (const feature of facet.features) {
           if (feature.$type === 'app.bsky.richtext.facet#link') {
-            return false;
+            return { shouldInclude: false, isReply };
           }
         }
       }
     }
   }
 
-  // 4. Negative keyword filters
+  // 3. Negative keyword filters
   if (POLITICAL_PATTERN.test(text)) {
-    return false;
+    return { shouldInclude: false, isReply };
   }
   if (TECH_PROGRAMMING_PATTERN.test(text)) {
-    return false;
+    return { shouldInclude: false, isReply };
   }
   if (PROMO_MARKETING_PATTERN.test(text)) {
-    return false;
+    return { shouldInclude: false, isReply };
   }
 
-  // 5. Hashtag limits: maximum of 1 hashtag (spam/promo posts tend to stack tags)
+  // 4. Hashtag limits: maximum of 1 hashtag
   const hashtags = (text.match(/#[^\s#]+/g) || []);
   if (hashtags.length > 1) {
-    return false;
+    return { shouldInclude: false, isReply };
   }
 
-  // 6. Mention limits: maximum of 1 mention (spam/engagement bait tags many people)
+  // 5. Mention limits: maximum of 1 mention
   const mentions = (text.match(/@[^\s@]+/g) || []);
   if (mentions.length > 1) {
-    return false;
+    return { shouldInclude: false, isReply };
   }
 
-  // 7. Max length to keep it brief
+  // 6. Max length to keep it brief
   if (text.length > 280) {
-    return false;
+    return { shouldInclude: false, isReply };
   }
 
-  // If it passed all negative filters:
-  // - If it has images, it's highly likely to be a meme or a personal photo (include it!)
-  // - If it is plain text, since it has no politics, no tech, no links, and no promo, it is highly likely to be a personal thought (include it!)
-  return true;
+  return { shouldInclude: true, isReply };
 }
