@@ -1,0 +1,29 @@
+{
+  "name": "bluesky-thoughts-memes-feed",
+  "version": "1.0.0",
+  "description": "A Bluesky custom feed generator showing only personal thoughts, everyday life updates, and memes.",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "publish-feed": "tsx src/publish.ts"
+  },
+  "dependencies": {
+    "@atproto/api": "^0.13.11",
+    "@skyware/jetstream": "^0.2.0",
+    "better-sqlite3": "^11.0.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.10",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.12.12",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.4.5",
+    "tsx": "^4.10.1"
+  }
+}

@@ -1,0 +1,6 @@
+node_modules
+dist
+feed.db
+feed.db-journal
+.env
+.DS_Store
