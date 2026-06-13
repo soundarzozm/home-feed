@@ -36,27 +36,143 @@ export function initDb() {
       PRIMARY KEY (postUri, likerDid)
     );
     CREATE INDEX IF NOT EXISTS idx_likes_likerDid ON likes(likerDid);
+
+    CREATE TABLE IF NOT EXISTS follows (
+      userDid TEXT NOT NULL,
+      followedDid TEXT NOT NULL,
+      updatedAt TEXT NOT NULL,
+      PRIMARY KEY (userDid, followedDid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_follows_userDid ON follows(userDid);
+    CREATE INDEX IF NOT EXISTS idx_follows_followedDid ON follows(followedDid);
   `);
 }
 
-export function savePost(uri: string, cid: string, author: string, text: string, isReply: boolean = false) {
-  const indexedAt = new Date().toISOString();
-  const stmt = db.prepare(`
+// Queues for batch writing
+interface QueuedPost {
+  uri: string;
+  cid: string;
+  author: string;
+  text: string;
+  isReply: number;
+  indexedAt: string;
+}
+
+interface QueuedLike {
+  postUri: string;
+  likerDid: string;
+  indexedAt: string;
+}
+
+let queuedPosts: QueuedPost[] = [];
+let queuedLikes: QueuedLike[] = [];
+
+export function queuePost(uri: string, cid: string, author: string, text: string, isReply: boolean = false) {
+  queuedPosts.push({
+    uri,
+    cid,
+    author,
+    text,
+    isReply: isReply ? 1 : 0,
+    indexedAt: new Date().toISOString()
+  });
+}
+
+export function queueLike(postUri: string, likerDid: string) {
+  queuedLikes.push({
+    postUri,
+    likerDid,
+    indexedAt: new Date().toISOString()
+  });
+}
+
+// Flush queue to database inside a single transaction (every 1 second)
+export function flushQueue() {
+  if (queuedPosts.length === 0 && queuedLikes.length === 0) return;
+
+  const start = Date.now();
+  
+  const insertPostStmt = db.prepare(`
     INSERT INTO posts (uri, cid, author, text, isReply, indexedAt)
     VALUES (?, ?, ?, ?, ?, ?)
     ON CONFLICT(uri) DO NOTHING
   `);
-  stmt.run(uri, cid, author, text, isReply ? 1 : 0, indexedAt);
-}
 
-export function saveLike(postUri: string, likerDid: string) {
-  const indexedAt = new Date().toISOString();
-  const stmt = db.prepare(`
+  const insertLikeStmt = db.prepare(`
     INSERT INTO likes (postUri, likerDid, indexedAt)
     VALUES (?, ?, ?)
     ON CONFLICT(postUri, likerDid) DO NOTHING
   `);
-  stmt.run(postUri, likerDid, indexedAt);
+
+  const transaction = db.transaction((posts: QueuedPost[], likes: QueuedLike[]) => {
+    for (const post of posts) {
+      insertPostStmt.run(post.uri, post.cid, post.author, post.text, post.isReply, post.indexedAt);
+    }
+    for (const like of likes) {
+      insertLikeStmt.run(like.postUri, like.likerDid, like.indexedAt);
+    }
+  });
+
+  try {
+    transaction(queuedPosts, queuedLikes);
+    const countP = queuedPosts.length;
+    const countL = queuedLikes.length;
+    queuedPosts = [];
+    queuedLikes = [];
+    if (countP > 0 || countL > 0) {
+      console.log(`[DB] Flushed ${countP} posts and ${countL} likes in ${Date.now() - start}ms.`);
+    }
+  } catch (err) {
+    console.error('[DB] Failed to flush queue transaction:', err);
+  }
+}
+
+// Follows relation helper methods
+export function saveFollows(userDid: string, followedDids: string[]) {
+  const updatedAt = new Date().toISOString();
+  
+  const deleteStmt = db.prepare('DELETE FROM follows WHERE userDid = ?');
+  const insertStmt = db.prepare(`
+    INSERT INTO follows (userDid, followedDid, updatedAt)
+    VALUES (?, ?, ?)
+    ON CONFLICT(userDid, followedDid) DO NOTHING
+  `);
+
+  const transaction = db.transaction((user: string, dids: string[]) => {
+    deleteStmt.run(user);
+    for (const did of dids) {
+      insertStmt.run(user, did, updatedAt);
+    }
+  });
+
+  try {
+    transaction(userDid, followedDids);
+    console.log(`[DB] Saved ${followedDids.length} follows for user ${userDid}`);
+  } catch (err) {
+    console.error(`[DB] Failed to save follows for user ${userDid}:`, err);
+  }
+}
+
+export function loadAllFollowedDids(): Set<string> {
+  try {
+    const rows = db.prepare('SELECT DISTINCT followedDid FROM follows').all() as { followedDid: string }[];
+    const set = new Set(rows.map((r) => r.followedDid));
+    console.log(`[DB] Loaded ${set.size} unique followed DIDs from DB into active set.`);
+    return set;
+  } catch (err) {
+    console.error('[DB] Failed to load followed DIDs:', err);
+    return new Set();
+  }
+}
+
+export function getCachedFollowedDids(userDid: string): Set<string> {
+  try {
+    const rows = db.prepare('SELECT followedDid FROM follows WHERE userDid = ?').all(userDid) as { followedDid: string }[];
+    return new Set(rows.map((r) => r.followedDid));
+  } catch (err) {
+    console.error(`[DB] Failed to fetch follows for user ${userDid} from DB:`, err);
+    return new Set();
+  }
 }
 
 // Fallback public feed (no personalization, original posts only)
@@ -96,6 +212,7 @@ export function getFeed(limit: number = 50, cursor?: string): { feed: { post: st
 
 // Personalized feed ranking (Time decay + Follows Boost + Likes Boost)
 export function getPersonalizedFeed(
+  userDid: string,
   followedDidsSet: Set<string>,
   limit: number = 50,
   cursor?: string
@@ -105,32 +222,32 @@ export function getPersonalizedFeed(
     return getFeed(limit, cursor);
   }
 
-  const followedDids = Array.from(followedDidsSet);
   const now = Date.now();
-  const placeholders = followedDids.map(() => '?').join(',');
 
-  // Fetch posts from followed users (max 1000)
+  // Fetch posts from followed users via SQL JOIN
   const followedPostsStmt = db.prepare(`
-    SELECT * FROM posts 
-    WHERE author IN (${placeholders})
-    ORDER BY indexedAt DESC
+    SELECT p.* FROM posts p
+    JOIN follows f ON p.author = f.followedDid
+    WHERE f.userDid = ?
+    ORDER BY p.indexedAt DESC
     LIMIT 1000
   `);
-  const followedPosts = followedPostsStmt.all(...followedDids) as any[];
+  const followedPosts = followedPostsStmt.all(userDid) as any[];
 
-  // Fetch posts liked by followed users (max 1000)
+  // Fetch posts liked by followed users via SQL JOIN
   const likedPostsStmt = db.prepare(`
     SELECT p.*, COUNT(l.likerDid) as followedLikesCount
     FROM posts p
     JOIN likes l ON p.uri = l.postUri
-    WHERE l.likerDid IN (${placeholders})
+    JOIN follows f ON l.likerDid = f.followedDid
+    WHERE f.userDid = ?
     GROUP BY p.uri
     ORDER BY p.indexedAt DESC
     LIMIT 1000
   `);
-  const likedPosts = likedPostsStmt.all(...followedDids) as any[];
+  const likedPosts = likedPostsStmt.all(userDid) as any[];
 
-  // Fetch recent general posts (max 1000)
+  // Fetch recent general posts
   const generalPostsStmt = db.prepare(`
     SELECT * FROM posts
     WHERE isReply = 0
@@ -184,9 +301,9 @@ export function getPersonalizedFeed(
     // Boost if authored by followed user
     if (followedDidsSet.has(post.author)) {
       if (post.isReply === 1) {
-        boost *= 4.0; // Followed user's replies get a solid boost
+        boost *= 4.0;
       } else {
-        boost *= 8.0; // Followed user's original posts get a huge boost
+        boost *= 8.0;
       }
     }
 

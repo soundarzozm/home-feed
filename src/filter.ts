@@ -58,7 +58,14 @@ export function shouldIncludePost(post: any): { shouldInclude: boolean; isReply:
   const isReply = !!post.reply;
   const text = post.text || '';
 
-  // 1. Filter out empty or very short posts (unless there's an image/media)
+  // 1. Language filter: If langs are provided, ensure it includes English ('en')
+  if (post.langs && post.langs.length > 0) {
+    if (!post.langs.includes('en')) {
+      return { shouldInclude: false, isReply };
+    }
+  }
+
+  // 2. Filter out empty or very short posts (unless there's an image/media)
   const hasImages = !!(post.embed && (
     post.embed.$type === 'app.bsky.embed.images' ||
     post.embed.$type === 'app.bsky.embed.recordWithMedia'
@@ -68,7 +75,7 @@ export function shouldIncludePost(post: any): { shouldInclude: boolean; isReply:
     return { shouldInclude: false, isReply };
   }
 
-  // 2. Filter out posts containing links (very common in promo/news/tech content)
+  // 3. Filter out posts containing links (very common in promo/news/tech content)
   if (LINK_PATTERN.test(text)) {
     return { shouldInclude: false, isReply };
   }
@@ -86,7 +93,7 @@ export function shouldIncludePost(post: any): { shouldInclude: boolean; isReply:
     }
   }
 
-  // 3. Negative keyword filters
+  // 4. Negative keyword filters
   if (POLITICAL_PATTERN.test(text)) {
     return { shouldInclude: false, isReply };
   }
@@ -97,19 +104,19 @@ export function shouldIncludePost(post: any): { shouldInclude: boolean; isReply:
     return { shouldInclude: false, isReply };
   }
 
-  // 4. Hashtag limits: maximum of 1 hashtag
+  // 5. Hashtag limits: maximum of 1 hashtag
   const hashtags = (text.match(/#[^\s#]+/g) || []);
   if (hashtags.length > 1) {
     return { shouldInclude: false, isReply };
   }
 
-  // 5. Mention limits: maximum of 1 mention
+  // 6. Mention limits: maximum of 1 mention
   const mentions = (text.match(/@[^\s@]+/g) || []);
   if (mentions.length > 1) {
     return { shouldInclude: false, isReply };
   }
 
-  // 6. Max length to keep it brief
+  // 7. Max length to keep it brief
   if (text.length > 280) {
     return { shouldInclude: false, isReply };
   }
