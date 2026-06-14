@@ -1,4 +1,4 @@
-# Bluesky "Thoughts & Memes" Feed Generator
+# Bluesky "Home" Feed Generator
 
 A lightweight, high-performance Bluesky custom feed generator that streams and filters posts using **Jetstream** and serves them using **Express** and **SQLite**.
 

@@ -37,6 +37,22 @@ export function initDb() {
     );
     CREATE INDEX IF NOT EXISTS idx_likes_likerDid ON likes(likerDid);
 
+    CREATE TABLE IF NOT EXISTS reposts (
+      postUri TEXT NOT NULL,
+      reposterDid TEXT NOT NULL,
+      indexedAt TEXT NOT NULL,
+      PRIMARY KEY (postUri, reposterDid)
+    );
+    CREATE INDEX IF NOT EXISTS idx_reposts_reposterDid ON reposts(reposterDid);
+
+    CREATE TABLE IF NOT EXISTS replies (
+      parentUri TEXT NOT NULL,
+      replyAuthor TEXT NOT NULL,
+      indexedAt TEXT NOT NULL,
+      PRIMARY KEY (parentUri, replyAuthor)
+    );
+    CREATE INDEX IF NOT EXISTS idx_replies_parentUri ON replies(parentUri);
+
     CREATE TABLE IF NOT EXISTS follows (
       userDid TEXT NOT NULL,
       followedDid TEXT NOT NULL,
@@ -64,8 +80,22 @@ interface QueuedLike {
   indexedAt: string;
 }
 
+interface QueuedRepost {
+  postUri: string;
+  reposterDid: string;
+  indexedAt: string;
+}
+
+interface QueuedReply {
+  parentUri: string;
+  replyAuthor: string;
+  indexedAt: string;
+}
+
 let queuedPosts: QueuedPost[] = [];
 let queuedLikes: QueuedLike[] = [];
+let queuedReposts: QueuedRepost[] = [];
+let queuedReplies: QueuedReply[] = [];
 
 export function queuePost(uri: string, cid: string, author: string, text: string, isReply: boolean = false) {
   queuedPosts.push({
@@ -86,9 +116,25 @@ export function queueLike(postUri: string, likerDid: string) {
   });
 }
 
+export function queueRepost(postUri: string, reposterDid: string) {
+  queuedReposts.push({
+    postUri,
+    reposterDid,
+    indexedAt: new Date().toISOString()
+  });
+}
+
+export function queueReply(parentUri: string, replyAuthor: string) {
+  queuedReplies.push({
+    parentUri,
+    replyAuthor,
+    indexedAt: new Date().toISOString()
+  });
+}
+
 // Flush queue to database inside a single transaction (every 1 second)
 export function flushQueue() {
-  if (queuedPosts.length === 0 && queuedLikes.length === 0) return;
+  if (queuedPosts.length === 0 && queuedLikes.length === 0 && queuedReposts.length === 0 && queuedReplies.length === 0) return;
 
   const start = Date.now();
   
@@ -104,23 +150,50 @@ export function flushQueue() {
     ON CONFLICT(postUri, likerDid) DO NOTHING
   `);
 
-  const transaction = db.transaction((posts: QueuedPost[], likes: QueuedLike[]) => {
+  const insertRepostStmt = db.prepare(`
+    INSERT INTO reposts (postUri, reposterDid, indexedAt)
+    VALUES (?, ?, ?)
+    ON CONFLICT(postUri, reposterDid) DO NOTHING
+  `);
+
+  const insertReplyStmt = db.prepare(`
+    INSERT INTO replies (parentUri, replyAuthor, indexedAt)
+    VALUES (?, ?, ?)
+    ON CONFLICT(parentUri, replyAuthor) DO NOTHING
+  `);
+
+  const transaction = db.transaction((
+    posts: QueuedPost[], 
+    likes: QueuedLike[], 
+    reposts: QueuedRepost[],
+    replies: QueuedReply[]
+  ) => {
     for (const post of posts) {
       insertPostStmt.run(post.uri, post.cid, post.author, post.text, post.isReply, post.indexedAt);
     }
     for (const like of likes) {
       insertLikeStmt.run(like.postUri, like.likerDid, like.indexedAt);
     }
+    for (const repost of reposts) {
+      insertRepostStmt.run(repost.postUri, repost.reposterDid, repost.indexedAt);
+    }
+    for (const reply of replies) {
+      insertReplyStmt.run(reply.parentUri, reply.replyAuthor, reply.indexedAt);
+    }
   });
 
   try {
-    transaction(queuedPosts, queuedLikes);
+    transaction(queuedPosts, queuedLikes, queuedReposts, queuedReplies);
     const countP = queuedPosts.length;
     const countL = queuedLikes.length;
+    const countR = queuedReposts.length;
+    const countRep = queuedReplies.length;
     queuedPosts = [];
     queuedLikes = [];
-    if (countP > 0 || countL > 0) {
-      console.log(`[DB] Flushed ${countP} posts and ${countL} likes in ${Date.now() - start}ms.`);
+    queuedReposts = [];
+    queuedReplies = [];
+    if (countP > 0 || countL > 0 || countR > 0 || countRep > 0) {
+      console.log(`[DB] Flushed ${countP} posts, ${countL} likes, ${countR} reposts, and ${countRep} replies in ${Date.now() - start}ms.`);
     }
   } catch (err) {
     console.error('[DB] Failed to flush queue transaction:', err);
@@ -162,6 +235,16 @@ export function loadAllFollowedDids(): Set<string> {
   } catch (err) {
     console.error('[DB] Failed to load followed DIDs:', err);
     return new Set();
+  }
+}
+
+export function loadRecentPostUris(limit: number = 50000): string[] {
+  try {
+    const rows = db.prepare('SELECT uri FROM posts ORDER BY indexedAt DESC LIMIT ?').all(limit) as { uri: string }[];
+    return rows.map((r) => r.uri);
+  } catch (err) {
+    console.error('[DB] Failed to load recent post URIs:', err);
+    return [];
   }
 }
 
@@ -210,116 +293,115 @@ export function getFeed(limit: number = 50, cursor?: string): { feed: { post: st
   return { feed, cursor: nextCursor };
 }
 
-// Personalized feed ranking (Time decay + Follows Boost + Likes Boost)
+// Personalized feed ranking (Time decay + Follows Boost + Likes Boost + Reposts Boost + Content Alignment)
 export function getPersonalizedFeed(
   userDid: string,
   followedDidsSet: Set<string>,
+  authorReputations: Map<string, { avgEngagement: number; postCount: number }>,
   limit: number = 50,
   cursor?: string
 ): { feed: { post: string }[]; cursor?: string } {
-  // If the user doesn't follow anyone, return the general public feed
-  if (followedDidsSet.size === 0) {
-    return getFeed(limit, cursor);
-  }
-
   const now = Date.now();
+  const cutoff = new Date(now - 48 * 60 * 60 * 1000).toISOString(); // 48 hours ago
 
-  // Fetch posts from followed users via SQL JOIN
-  const followedPostsStmt = db.prepare(`
-    SELECT p.* FROM posts p
-    JOIN follows f ON p.author = f.followedDid
-    WHERE f.userDid = ?
-    ORDER BY p.indexedAt DESC
-    LIMIT 1000
-  `);
-  const followedPosts = followedPostsStmt.all(userDid) as any[];
+  // 1. Fetch user's personalized topic profile (Content-Based recommender signal)
+  const interestProfile = getUserInterestProfile(userDid);
 
-  // Fetch posts liked by followed users via SQL JOIN
-  const likedPostsStmt = db.prepare(`
-    SELECT p.*, COUNT(l.likerDid) as followedLikesCount
+  // 2. Fetch all candidate posts from the last 48 hours with their engagement stats
+  const stmt = db.prepare(`
+    SELECT 
+      p.uri, 
+      p.cid, 
+      p.author, 
+      p.text, 
+      p.isReply, 
+      p.indexedAt,
+      (SELECT COUNT(*) FROM likes WHERE postUri = p.uri) as globalLikesCount,
+      (SELECT COUNT(*) FROM reposts WHERE postUri = p.uri) as globalRepostsCount,
+      (SELECT COUNT(*) FROM replies WHERE parentUri = p.uri) as globalRepliesCount,
+      (SELECT COUNT(*) FROM likes l JOIN follows f ON l.likerDid = f.followedDid WHERE f.userDid = ? AND l.postUri = p.uri) as followedLikesCount,
+      (SELECT COUNT(*) FROM reposts r JOIN follows f ON r.reposterDid = f.followedDid WHERE f.userDid = ? AND r.postUri = p.uri) as followedRepostsCount,
+      (SELECT COUNT(*) FROM replies rp JOIN follows f ON rp.replyAuthor = f.followedDid WHERE f.userDid = ? AND rp.parentUri = p.uri) as followedRepliesCount,
+      (SELECT 1 FROM follows WHERE userDid = ? AND followedDid = p.author) as isFromFollowed
     FROM posts p
-    JOIN likes l ON p.uri = l.postUri
-    JOIN follows f ON l.likerDid = f.followedDid
-    WHERE f.userDid = ?
-    GROUP BY p.uri
+    WHERE p.indexedAt > ?
     ORDER BY p.indexedAt DESC
-    LIMIT 1000
+    LIMIT 2000
   `);
-  const likedPosts = likedPostsStmt.all(userDid) as any[];
 
-  // Fetch recent general posts
-  const generalPostsStmt = db.prepare(`
-    SELECT * FROM posts
-    WHERE isReply = 0
-    ORDER BY indexedAt DESC
-    LIMIT 1000
-  `);
-  const generalPosts = generalPostsStmt.all() as any[];
+  const candidates = stmt.all(userDid, userDid, userDid, userDid, cutoff) as any[];
 
-  // Combine and score candidates
-  const candidatesMap = new Map<string, { post: any; score: number }>();
-
-  const addCandidate = (post: any, followedLikesCount: number = 0) => {
-    if (candidatesMap.has(post.uri)) {
-      if (followedLikesCount > 0) {
-        const existing = candidatesMap.get(post.uri)!;
-        existing.post.followedLikesCount = Math.max(existing.post.followedLikesCount || 0, followedLikesCount);
-      }
-      return;
-    }
-
-    // Filter out replies from people NOT followed
-    if (post.isReply === 1 && !followedDidsSet.has(post.author)) {
-      return;
-    }
-
-    candidatesMap.set(post.uri, { post, score: 0 });
-  };
-
-  for (const p of followedPosts) {
-    addCandidate(p);
-  }
-  for (const p of likedPosts) {
-    addCandidate(p, p.followedLikesCount);
-  }
-  for (const p of generalPosts) {
-    addCandidate(p);
-  }
-
-  const candidates = Array.from(candidatesMap.values());
-  for (const c of candidates) {
-    const post = c.post;
+  // 3. Score candidates
+  const scoredCandidates = candidates.map((post) => {
     const ageMs = now - new Date(post.indexedAt).getTime();
-    const ageHours = ageMs / (1000 * 60 * 60);
+    const ageHours = Math.max(0.01, ageMs / (1000 * 60 * 60));
 
-    // Gravity time decay formula
-    let baseScore = 100 / Math.pow(ageHours + 2, 1.8);
+    // Time decay formula (Hacker News style)
+    const gravity = 1.8;
 
-    // Personalization boosts
-    let boost = 1.0;
+    const globalLikes = post.globalLikesCount || 0;
+    const globalReposts = post.globalRepostsCount || 0;
+    const globalReplies = post.globalRepliesCount || 0;
 
-    // Boost if authored by followed user
-    if (followedDidsSet.has(post.author)) {
+    const followedLikes = post.followedLikesCount || 0;
+    const followedReposts = post.followedRepostsCount || 0;
+    const followedReplies = post.followedRepliesCount || 0;
+
+    // Apply X-style weights: Repost: 20x, Reply: 27x, Like: 1x
+    // Network boost adds heavier multipliers for immediate friends' activity
+    const globalEngagement = (globalLikes * 1) + (globalReposts * 20) + (globalReplies * 27);
+    const networkEngagement = (followedLikes * 5) + (followedReposts * 40) + (followedReplies * 54);
+    const totalEngagement = globalEngagement + networkEngagement;
+
+    let score = (totalEngagement + 1) / Math.pow(ageHours + 2, gravity);
+
+    // Boost network content
+    const isFromNetwork = post.author === userDid || post.isFromFollowed === 1;
+    if (isFromNetwork) {
       if (post.isReply === 1) {
-        boost *= 4.0;
+        score *= 3.0; // Reply from follow
       } else {
-        boost *= 8.0;
+        score *= 8.0; // Post from follow
+      }
+    } else {
+      // Out-of-network reply penalty
+      if (post.isReply === 1) {
+        score *= 0.1; // Demote replies to strangers unless they go viral
+      }
+
+      // Out-of-network content penalty if it has zero engagement
+      // This prevents random unliked/unreposted posts from cluttering the feed
+      if (totalEngagement === 0) {
+        score *= 0.01;
       }
     }
 
-    // Boost based on followed users' likes
-    const likesCount = post.followedLikesCount || 0;
-    if (likesCount > 0) {
-      boost *= (1.0 + likesCount * 3.0);
+    // Apply Creator Reputation multipliers (crawled in background)
+    const reputation = authorReputations.get(post.author);
+    if (reputation) {
+      // Spammer penalty: if posting more than 15 times a day, scale down
+      if (reputation.postCount > 15) {
+        const spamPenalty = Math.max(0.2, 1.0 - (reputation.postCount - 15) * 0.05);
+        score *= spamPenalty;
+      }
+      // Creator boost: if their posts average > 2 engagement units, boost
+      if (reputation.avgEngagement > 2.0) {
+        const creatorBoost = 1.0 + Math.min(2.0, reputation.avgEngagement * 0.15);
+        score *= creatorBoost;
+      }
     }
 
-    c.score = baseScore * boost;
-  }
+    // Apply User Interest Profile Alignment (Cosine similarity/keyword overlap)
+    const profileRelevance = calculateProfileRelevance(post.text, interestProfile);
+    score *= profileRelevance;
 
-  // Sort by final recommendation score
-  candidates.sort((a, b) => b.score - a.score);
+    return { uri: post.uri, score };
+  });
 
-  // Index-based pagination
+  // 4. Sort by final score
+  scoredCandidates.sort((a, b) => b.score - a.score);
+
+  // 5. Index-based pagination
   let startIndex = 0;
   if (cursor) {
     const parsedCursor = parseInt(cursor, 10);
@@ -328,11 +410,11 @@ export function getPersonalizedFeed(
     }
   }
 
-  const sliced = candidates.slice(startIndex, startIndex + limit);
-  const feed = sliced.map((c) => ({ post: c.post.uri }));
+  const sliced = scoredCandidates.slice(startIndex, startIndex + limit);
+  const feed = sliced.map((c) => ({ post: c.uri }));
 
   let nextCursor: string | undefined;
-  if (startIndex + limit < candidates.length) {
+  if (startIndex + limit < scoredCandidates.length) {
     nextCursor = (startIndex + limit).toString();
   }
 
@@ -350,7 +432,15 @@ export function pruneOldPosts(maxAgeHours: number = 48) {
   const likesStmt = db.prepare(`DELETE FROM likes WHERE indexedAt < ?`);
   const likesRes = likesStmt.run(cutoff);
 
-  console.log(`[DB] Pruned ${postsRes.changes} posts and ${likesRes.changes} likes older than ${maxAgeHours} hours.`);
+  // Prune reposts
+  const repostsStmt = db.prepare(`DELETE FROM reposts WHERE indexedAt < ?`);
+  const repostsRes = repostsStmt.run(cutoff);
+
+  // Prune replies
+  const repliesStmt = db.prepare(`DELETE FROM replies WHERE indexedAt < ?`);
+  const repliesRes = repliesStmt.run(cutoff);
+
+  console.log(`[DB] Pruned ${postsRes.changes} posts, ${likesRes.changes} likes, ${repostsRes.changes} reposts, and ${repliesRes.changes} replies older than ${maxAgeHours} hours.`);
 }
 
 export function getPostTextLocal(uri: string): string | null {
@@ -360,4 +450,109 @@ export function getPostTextLocal(uri: string): string | null {
   } catch {
     return null;
   }
+}
+
+// Stop words for TF-IDF / Content-based profiling
+const STOP_WORDS = new Set([
+  'a', 'about', 'above', 'after', 'again', 'against', 'all', 'am', 'an', 'and', 'any', 'are', 'arent', 'as', 'at',
+  'be', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'but', 'by', 'cant', 'cannot', 'could',
+  'did', 'didnt', 'do', 'does', 'doesnt', 'doing', 'dont', 'down', 'during', 'each', 'few', 'for', 'from', 'further',
+  'had', 'hadnt', 'has', 'hasnt', 'have', 'havent', 'having', 'he', 'hed', 'hell', 'hes', 'her', 'here', 'heres',
+  'hers', 'herself', 'him', 'himself', 'his', 'how', 'hows', 'i', 'id', 'ill', 'im', 'ive', 'if', 'in', 'into',
+  'is', 'isnt', 'it', 'its', 'itself', 'lets', 'me', 'more', 'most', 'mustnt', 'my', 'myself', 'no', 'nor', 'not',
+  'of', 'off', 'on', 'once', 'only', 'or', 'other', 'ought', 'our', 'ours', 'ourselves', 'out', 'over', 'own',
+  'same', 'shant', 'she', 'shed', 'shell', 'shes', 'should', 'shouldnt', 'so', 'some', 'such', 'than', 'that',
+  'thats', 'the', 'their', 'theirs', 'them', 'themselves', 'then', 'there', 'theres', 'these', 'they', 'theyd',
+  'theyll', 'theyre', 'theyve', 'this', 'those', 'through', 'to', 'too', 'under', 'until', 'up', 'very', 'was',
+  'wasnt', 'we', 'wed', 'well', 'were', 'weve', 'werent', 'what', 'whats', 'when', 'whens', 'where', 'wheres',
+  'which', 'while', 'who', 'whos', 'whom', 'why', 'whys', 'with', 'wont', 'would', 'wouldnt', 'you', 'youd',
+  'youll', 'youre', 'youve', 'your', 'yours', 'yourself', 'yourselves', 'the', 'and', 'but', 'for', 'our', 'you'
+]);
+
+function extractKeywords(text: string): string[] {
+  if (!text) return [];
+  return text
+    .toLowerCase()
+    .replace(/[^\w\s#@]/g, '')
+    .split(/\s+/)
+    .filter(word => word.length > 2 && !STOP_WORDS.has(word));
+}
+
+export function getUserInteractedPostTexts(userDid: string, limit: number = 100): string[] {
+  try {
+    const rows = db.prepare(`
+      SELECT DISTINCT p.text FROM posts p
+      JOIN likes l ON p.uri = l.postUri
+      WHERE l.likerDid = ?
+      UNION
+      SELECT DISTINCT p.text FROM posts p
+      JOIN reposts r ON p.uri = r.postUri
+      WHERE r.reposterDid = ?
+      LIMIT ?
+    `).all(userDid, userDid, limit) as { text: string }[];
+    return rows.map((r) => r.text);
+  } catch (err) {
+    console.error('[DB] Failed to fetch user interacted post texts:', err);
+    return [];
+  }
+}
+
+export function getUserInterestProfile(userDid: string): Map<string, number> {
+  const profile = new Map<string, number>();
+  if (!userDid || userDid === 'public') return profile;
+  
+  const texts = getUserInteractedPostTexts(userDid, 100);
+  for (const text of texts) {
+    const keywords = extractKeywords(text);
+    for (const kw of keywords) {
+      profile.set(kw, (profile.get(kw) || 0) + 1);
+    }
+  }
+  return profile;
+}
+
+function calculateProfileRelevance(postText: string, profile: Map<string, number>): number {
+  if (profile.size === 0) return 1.0;
+  
+  const keywords = extractKeywords(postText);
+  if (keywords.length === 0) return 1.0;
+  
+  let score = 0;
+  for (const kw of keywords) {
+    if (profile.has(kw)) {
+      score += profile.get(kw)!;
+    }
+  }
+  
+  const multiplier = 1.0 + Math.log1p(score) * 0.4;
+  return Math.min(3.0, multiplier);
+}
+
+export function getAuthorReputations(cutoff: string): Map<string, { avgEngagement: number; postCount: number }> {
+  const reputations = new Map<string, { avgEngagement: number; postCount: number }>();
+  try {
+    const rows = db.prepare(`
+      SELECT 
+        p.author, 
+        COUNT(p.uri) as postCount,
+        COALESCE(SUM(
+          (SELECT COUNT(*) FROM likes WHERE postUri = p.uri) * 1 + 
+          (SELECT COUNT(*) FROM reposts WHERE postUri = p.uri) * 3 +
+          (SELECT COUNT(*) FROM replies WHERE parentUri = p.uri) * 5
+        ), 0) as totalEngagement
+      FROM posts p
+      WHERE p.indexedAt > ?
+      GROUP BY p.author
+    `).all(cutoff) as { author: string; postCount: number; totalEngagement: number }[];
+
+    for (const r of rows) {
+      reputations.set(r.author, {
+        avgEngagement: r.totalEngagement / Math.max(1, r.postCount),
+        postCount: r.postCount
+      });
+    }
+  } catch (err) {
+    console.error('[DB] Failed to calculate author reputations:', err);
+  }
+  return reputations;
 }

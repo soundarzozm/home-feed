@@ -6,13 +6,17 @@ import {
   initDb, 
   queuePost, 
   queueLike, 
+  queueRepost,
+  queueReply,
   flushQueue, 
   getPersonalizedFeed, 
   pruneOldPosts,
   saveFollows,
   loadAllFollowedDids,
   getCachedFollowedDids,
-  getPostTextLocal
+  getPostTextLocal,
+  loadRecentPostUris,
+  getAuthorReputations
 } from './db.js';
 import { shouldIncludePost, isTextClean } from './filter.js';
 
@@ -28,6 +32,46 @@ const feedUri = `at://${publisherDid}/app.bsky.feed.generator/${feedRecordKey}`;
 // Initialize DB and load cached follows into memory
 initDb();
 const activeFollowedDids = loadAllFollowedDids();
+
+// Keep a memory cache of the recently indexed post URIs to capture global engagement
+const indexedPostsCache = new Set<string>();
+const maxCacheSize = 50000;
+const indexedPostsQueue: string[] = [];
+
+function trackIndexedPost(uri: string) {
+  if (!indexedPostsCache.has(uri)) {
+    indexedPostsCache.add(uri);
+    indexedPostsQueue.push(uri);
+    if (indexedPostsQueue.length > maxCacheSize) {
+      const oldest = indexedPostsQueue.shift();
+      if (oldest) indexedPostsCache.delete(oldest);
+    }
+  }
+}
+
+// Pre-populate cache with existing post URIs from the database
+const recentUris = loadRecentPostUris(maxCacheSize);
+for (const uri of recentUris) {
+  trackIndexedPost(uri);
+}
+console.log(`[Cache] Pre-populated indexed post cache with ${indexedPostsCache.size} URIs.`);
+
+// Background Author Reputation Crawler (Anti-Spam & Creator Boosts)
+let authorReputations = new Map<string, { avgEngagement: number; postCount: number }>();
+
+function updateAuthorReputations() {
+  try {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    authorReputations = getAuthorReputations(cutoff);
+    console.log(`[Reputation] Updated reputations for ${authorReputations.size} authors.`);
+  } catch (err) {
+    console.error('[Reputation] Error updating author reputations:', err);
+  }
+}
+
+// Initial calculation and cron update every 5 minutes
+updateAuthorReputations();
+setInterval(updateAuthorReputations, 5 * 60 * 1000);
 
 const app = express();
 
@@ -194,7 +238,13 @@ app.get('/xrpc/app.bsky.feed.getFeedSkeleton', async (req, res) => {
       followedDids = await getFollowedDids(requesterDid);
     }
 
-    const result = getPersonalizedFeed(requesterDid || 'public', followedDids, limitParam, cursorParam);
+    const result = getPersonalizedFeed(
+      requesterDid || 'public', 
+      followedDids, 
+      authorReputations,
+      limitParam, 
+      cursorParam
+    );
 
     // Cache results for 60 seconds
     feedOutputCache.set(cacheKey, {
@@ -219,7 +269,7 @@ app.listen(port, () => {
 // Start Jetstream Client
 console.log('[Jetstream] Subscribing to Bluesky post/like stream...');
 const jetstream = new Jetstream({
-  wantedCollections: ['app.bsky.feed.post', 'app.bsky.feed.like'],
+  wantedCollections: ['app.bsky.feed.post', 'app.bsky.feed.like', 'app.bsky.feed.repost'],
   endpoint: 'wss://jetstream1.us-east.bsky.network/subscribe'
 });
 
@@ -253,6 +303,19 @@ jetstream.onCreate('app.bsky.feed.post', async (event) => {
   const uri = `at://${author}/${event.commit.collection}/${event.commit.rkey}`;
   const cid = event.commit.cid;
 
+  // 1. Capture replies to our indexed posts to measure conversation engagement
+  if (post.reply && post.reply.parent) {
+    const parentUri = post.reply.parent.uri;
+    if (indexedPostsCache.has(parentUri)) {
+      try {
+        queueReply(parentUri, author);
+      } catch (err) {
+        console.error('[Jetstream] Error logging reply count:', err);
+      }
+    }
+  }
+
+  // 2. Determine if this post itself should be indexed in our feed
   try {
     const { shouldInclude, isReply } = shouldIncludePost(post);
     if (!shouldInclude) return;
@@ -276,22 +339,38 @@ jetstream.onCreate('app.bsky.feed.post', async (event) => {
     }
 
     queuePost(uri, cid, author, post.text || '', isReply);
+    trackIndexedPost(uri);
   } catch (err) {
     console.error('[Jetstream] Error processing post:', err);
   }
 });
 
-// Handle Likes (Queue if liked by someone in our activeFollowedDids - Proposal 3)
+// Handle Likes (Queue global likes for posts we have indexed)
 jetstream.onCreate('app.bsky.feed.like', (event) => {
   const like = event.commit.record;
   const likerDid = event.did;
   const postUri = like.subject?.uri;
 
-  if (postUri && activeFollowedDids.has(likerDid)) {
+  if (postUri && indexedPostsCache.has(postUri)) {
     try {
       queueLike(postUri, likerDid);
     } catch (err) {
       console.error('[Jetstream] Error processing like:', err);
+    }
+  }
+});
+
+// Handle Reposts (Queue global reposts for posts we have indexed)
+jetstream.onCreate('app.bsky.feed.repost', (event) => {
+  const repost = event.commit.record;
+  const reposterDid = event.did;
+  const postUri = repost.subject?.uri;
+
+  if (postUri && indexedPostsCache.has(postUri)) {
+    try {
+      queueRepost(postUri, reposterDid);
+    } catch (err) {
+      console.error('[Jetstream] Error processing repost:', err);
     }
   }
 });

@@ -33,9 +33,9 @@ async function run() {
     rkey: feedRecordKey,
     record: {
       did: feedGenDid,
-      displayName: "Thoughts & Memes",
+      displayName: "For You",
       description:
-        "The essence of microblogging: no politics, no tech/programming content, and no promotional slop. Just everyday thoughts, feelings, jokes, and memes.",
+        "An X-style engagement-ranked feed. Surfaces viral tech/AI discussions, news, thoughts, and memes across Bluesky, prioritized by your network's likes and reposts.",
       createdAt: new Date().toISOString(),
     },
   });
