@@ -15,7 +15,6 @@ export interface Post {
   isReply: number;
   indexedAt: string;
 }
-
 export function initDb() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS posts (
@@ -24,7 +23,10 @@ export function initDb() {
       author TEXT NOT NULL,
       text TEXT NOT NULL,
       isReply INTEGER NOT NULL DEFAULT 0,
-      indexedAt TEXT NOT NULL
+      indexedAt TEXT NOT NULL,
+      likesCount INTEGER NOT NULL DEFAULT 0,
+      repostsCount INTEGER NOT NULL DEFAULT 0,
+      repliesCount INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author);
     CREATE INDEX IF NOT EXISTS idx_posts_indexedAt ON posts(indexedAt DESC);
@@ -62,6 +64,17 @@ export function initDb() {
     CREATE INDEX IF NOT EXISTS idx_follows_userDid ON follows(userDid);
     CREATE INDEX IF NOT EXISTS idx_follows_followedDid ON follows(followedDid);
   `);
+
+  // Run migrations for existing databases
+  try {
+    db.exec("ALTER TABLE posts ADD COLUMN likesCount INTEGER NOT NULL DEFAULT 0");
+  } catch {}
+  try {
+    db.exec("ALTER TABLE posts ADD COLUMN repostsCount INTEGER NOT NULL DEFAULT 0");
+  } catch {}
+  try {
+    db.exec("ALTER TABLE posts ADD COLUMN repliesCount INTEGER NOT NULL DEFAULT 0");
+  } catch {}
 }
 
 // Queues for batch writing
@@ -162,6 +175,10 @@ export function flushQueue() {
     ON CONFLICT(parentUri, replyAuthor) DO NOTHING
   `);
 
+  const updateLikeCountStmt = db.prepare('UPDATE posts SET likesCount = likesCount + 1 WHERE uri = ?');
+  const updateRepostCountStmt = db.prepare('UPDATE posts SET repostsCount = repostsCount + 1 WHERE uri = ?');
+  const updateReplyCountStmt = db.prepare('UPDATE posts SET repliesCount = repliesCount + 1 WHERE uri = ?');
+
   const transaction = db.transaction((
     posts: QueuedPost[], 
     likes: QueuedLike[], 
@@ -173,12 +190,15 @@ export function flushQueue() {
     }
     for (const like of likes) {
       insertLikeStmt.run(like.postUri, like.likerDid, like.indexedAt);
+      updateLikeCountStmt.run(like.postUri);
     }
     for (const repost of reposts) {
       insertRepostStmt.run(repost.postUri, repost.reposterDid, repost.indexedAt);
+      updateRepostCountStmt.run(repost.postUri);
     }
     for (const reply of replies) {
       insertReplyStmt.run(reply.parentUri, reply.replyAuthor, reply.indexedAt);
+      updateReplyCountStmt.run(reply.parentUri);
     }
   });
 
@@ -316,9 +336,9 @@ export function getPersonalizedFeed(
       p.text, 
       p.isReply, 
       p.indexedAt,
-      (SELECT COUNT(*) FROM likes WHERE postUri = p.uri) as globalLikesCount,
-      (SELECT COUNT(*) FROM reposts WHERE postUri = p.uri) as globalRepostsCount,
-      (SELECT COUNT(*) FROM replies WHERE parentUri = p.uri) as globalRepliesCount,
+      p.likesCount as globalLikesCount,
+      p.repostsCount as globalRepostsCount,
+      p.repliesCount as globalRepliesCount,
       (SELECT COUNT(*) FROM likes l JOIN follows f ON l.likerDid = f.followedDid WHERE f.userDid = ? AND l.postUri = p.uri) as followedLikesCount,
       (SELECT COUNT(*) FROM reposts r JOIN follows f ON r.reposterDid = f.followedDid WHERE f.userDid = ? AND r.postUri = p.uri) as followedRepostsCount,
       (SELECT COUNT(*) FROM replies rp JOIN follows f ON rp.replyAuthor = f.followedDid WHERE f.userDid = ? AND rp.parentUri = p.uri) as followedRepliesCount,
@@ -536,9 +556,9 @@ export function getAuthorReputations(cutoff: string): Map<string, { avgEngagemen
         p.author, 
         COUNT(p.uri) as postCount,
         COALESCE(SUM(
-          (SELECT COUNT(*) FROM likes WHERE postUri = p.uri) * 1 + 
-          (SELECT COUNT(*) FROM reposts WHERE postUri = p.uri) * 3 +
-          (SELECT COUNT(*) FROM replies WHERE parentUri = p.uri) * 5
+          p.likesCount * 1 + 
+          p.repostsCount * 3 +
+          p.repliesCount * 5
         ), 0) as totalEngagement
       FROM posts p
       WHERE p.indexedAt > ?
@@ -555,4 +575,23 @@ export function getAuthorReputations(cutoff: string): Map<string, { avgEngagemen
     console.error('[DB] Failed to calculate author reputations:', err);
   }
   return reputations;
+}
+
+export function getRecentPostUrisForSync(limit: number = 500): string[] {
+  try {
+    const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const rows = db.prepare('SELECT uri FROM posts WHERE indexedAt > ? ORDER BY indexedAt DESC LIMIT ?').all(cutoff) as { uri: string }[];
+    return rows.map((r) => r.uri);
+  } catch {
+    return [];
+  }
+}
+
+export function updatePostEngagementCounts(uri: string, likes: number, reposts: number, replies: number) {
+  try {
+    db.prepare('UPDATE posts SET likesCount = ?, repostsCount = ?, repliesCount = ? WHERE uri = ?')
+      .run(likes, reposts, replies, uri);
+  } catch (err) {
+    console.error('[DB] Failed to update post engagement counts:', err);
+  }
 }

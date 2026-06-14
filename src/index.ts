@@ -16,7 +16,9 @@ import {
   getCachedFollowedDids,
   getPostTextLocal,
   loadRecentPostUris,
-  getAuthorReputations
+  getAuthorReputations,
+  getRecentPostUrisForSync,
+  updatePostEngagementCounts
 } from './db.js';
 import { shouldIncludePost, isTextClean } from './filter.js';
 
@@ -95,6 +97,47 @@ async function loginAgent() {
   }
 }
 loginAgent();
+
+// Background Recommender Sync (fetches actual like/repost/reply counts from Bluesky API)
+async function syncPostEngagements() {
+  if (!isAgentLoggedIn) return;
+  
+  try {
+    const uris = getRecentPostUrisForSync(500); // sync last 500 posts
+    if (uris.length === 0) return;
+    
+    console.log(`[Sync] Syncing engagements for ${uris.length} posts with Bluesky AppView...`);
+    
+    // Batch in chunks of 25 (AppView getPosts limit)
+    for (let i = 0; i < uris.length; i += 25) {
+      const chunk = uris.slice(i, i + 25);
+      const response = await agent.app.bsky.feed.getPosts({ uris: chunk });
+      
+      for (const p of response.data.posts) {
+        updatePostEngagementCounts(
+          p.uri, 
+          p.likeCount ?? 0, 
+          p.repostCount ?? 0, 
+          p.replyCount ?? 0
+        );
+      }
+      
+      // Small sleep to avoid hammering the AppView API too fast
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    console.log('[Sync] Engagement sync completed successfully.');
+  } catch (err) {
+    console.error('[Sync] Error syncing engagements:', err);
+  }
+}
+
+// Bootstrap on startup (wait 5s for database/auth stability) and run every 10 minutes
+setTimeout(() => {
+  syncPostEngagements().catch(console.error);
+}, 5000);
+setInterval(() => {
+  syncPostEngagements().catch(console.error);
+}, 10 * 60 * 1000);
 
 // In-Memory cache for follows list (backed by database follows table)
 const followsCache = new Map<string, { dids: Set<string>; fetchedAt: number }>();
