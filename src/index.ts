@@ -381,7 +381,8 @@ jetstream.onCreate('app.bsky.feed.post', async (event) => {
       }
     }
 
-    queuePost(uri, cid, author, post.text || '', isReply);
+    const isQuote = !!quotedUri;
+    queuePost(uri, cid, author, post.text || '', isReply, isQuote);
     trackIndexedPost(uri);
   } catch (err) {
     console.error('[Jetstream] Error processing post:', err);

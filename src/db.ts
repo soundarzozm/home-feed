@@ -23,6 +23,7 @@ export function initDb() {
       author TEXT NOT NULL,
       text TEXT NOT NULL,
       isReply INTEGER NOT NULL DEFAULT 0,
+      isQuote INTEGER NOT NULL DEFAULT 0,
       indexedAt TEXT NOT NULL,
       likesCount INTEGER NOT NULL DEFAULT 0,
       repostsCount INTEGER NOT NULL DEFAULT 0,
@@ -75,6 +76,9 @@ export function initDb() {
   try {
     db.exec("ALTER TABLE posts ADD COLUMN repliesCount INTEGER NOT NULL DEFAULT 0");
   } catch {}
+  try {
+    db.exec("ALTER TABLE posts ADD COLUMN isQuote INTEGER NOT NULL DEFAULT 0");
+  } catch {}
 }
 
 // Queues for batch writing
@@ -84,6 +88,7 @@ interface QueuedPost {
   author: string;
   text: string;
   isReply: number;
+  isQuote: number;
   indexedAt: string;
 }
 
@@ -110,13 +115,21 @@ let queuedLikes: QueuedLike[] = [];
 let queuedReposts: QueuedRepost[] = [];
 let queuedReplies: QueuedReply[] = [];
 
-export function queuePost(uri: string, cid: string, author: string, text: string, isReply: boolean = false) {
+export function queuePost(
+  uri: string, 
+  cid: string, 
+  author: string, 
+  text: string, 
+  isReply: boolean = false,
+  isQuote: boolean = false
+) {
   queuedPosts.push({
     uri,
     cid,
     author,
     text,
     isReply: isReply ? 1 : 0,
+    isQuote: isQuote ? 1 : 0,
     indexedAt: new Date().toISOString()
   });
 }
@@ -152,8 +165,8 @@ export function flushQueue() {
   const start = Date.now();
   
   const insertPostStmt = db.prepare(`
-    INSERT INTO posts (uri, cid, author, text, isReply, indexedAt)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO posts (uri, cid, author, text, isReply, isQuote, indexedAt)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(uri) DO NOTHING
   `);
 
@@ -186,7 +199,7 @@ export function flushQueue() {
     replies: QueuedReply[]
   ) => {
     for (const post of posts) {
-      insertPostStmt.run(post.uri, post.cid, post.author, post.text, post.isReply, post.indexedAt);
+      insertPostStmt.run(post.uri, post.cid, post.author, post.text, post.isReply, post.isQuote, post.indexedAt);
     }
     for (const like of likes) {
       insertLikeStmt.run(like.postUri, like.likerDid, like.indexedAt);
@@ -335,6 +348,7 @@ export function getPersonalizedFeed(
       p.author, 
       p.text, 
       p.isReply, 
+      p.isQuote,
       p.indexedAt,
       p.likesCount as globalLikesCount,
       p.repostsCount as globalRepostsCount,
@@ -384,9 +398,10 @@ export function getPersonalizedFeed(
         score *= 8.0; // Post from follow
       }
     } else {
-      // Out-of-network reply penalty
+      // Out-of-network reply penalty: make it even stronger so random out-of-context replies to strangers don't show up.
+      // Instead, we show root posts with arguments (which gets boosted below).
       if (post.isReply === 1) {
-        score *= 0.1; // Demote replies to strangers unless they go viral
+        score *= 0.02;
       }
 
       // Out-of-network content penalty if it has zero engagement
@@ -394,6 +409,27 @@ export function getPersonalizedFeed(
       if (totalEngagement === 0) {
         score *= 0.01;
       }
+    }
+
+    // Apply Controversy / Spicy Debate Boost (The Ratio)
+    // If a post is a thread root (isReply === 0) and has generated replies, boost it based on debate metrics.
+    if (post.isReply === 0 && globalReplies > 0) {
+      const debateRatio = globalReplies / Math.max(1, globalLikes);
+      
+      // Base discussion boost: more replies = more active debate
+      let debateBoost = 1.0 + Math.min(2.5, globalReplies * 0.15);
+      
+      // Controversy boost ("The Ratio"): if replies outnumber likes, it's a heated argument
+      if (debateRatio > 1.0 && globalReplies >= 3) {
+        debateBoost *= (1.0 + Math.min(1.5, debateRatio * 0.3));
+      }
+      
+      score *= debateBoost;
+    }
+
+    // Quote posts are highly engaging vehicles for hot takes and commentary
+    if (post.isQuote === 1) {
+      score *= 1.8;
     }
 
     // Apply Creator Reputation multipliers (crawled in background)
